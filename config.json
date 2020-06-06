@@ -1,5 +1,5 @@
 {
-  "REPORT_DIR": "../homework",
+
   "LOG_DIR": "../homework",
   "LOG_FILE": "homework.log",
   "REPORT_SORT": "time_sum"
