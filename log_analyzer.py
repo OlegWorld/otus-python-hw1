@@ -75,12 +75,22 @@ def configurate_logger(logger_file_name):
 
 
 def read_paths(log_path):
-    file_begin = 'nginx-access-ui.log-'
-    date_pattern = r'.*.log-(\d{4})(\d{2})(\d{2}).*'
-    last_date, last_log_file = max(
-        [(date(*[int(num) for num in re.match(date_pattern, log).groups()]), log)
-         for log in filter(lambda filename: filename.startswith(file_begin), os.listdir(log_path))]
-    )
+    date_pattern = r'nginx-access-ui.log-(\d{4})(\d{2})(\d{2}).*'
+
+    last_date = date(1970, 1, 1)
+    last_log_file = None
+
+    for log_file in os.listdir(log_path):
+        match = re.match(date_pattern, log_file)
+        if match:
+            try:
+                file_date = date(*[int(num) for num in match.groups()])
+                if file_date > last_date:
+                    last_date = file_date
+                    last_log_file = log_file
+
+            except ValueError:
+                pass
 
     return DateLog(last_date, last_log_file)
 
@@ -134,6 +144,25 @@ def analyze_log_file(filename):
         logging.error("error opening the analysable file {}".format(filename))
 
 
+def collect_metrics(log_file_name):
+    total_metrics = {}
+    total, errors = 0, 0
+
+    for metrics in analyze_log_file(log_file_name):
+        total += 1
+        if metrics:
+            total_metrics.setdefault(metrics.url, []).append(metrics.time)
+
+        else:
+            errors += 1
+
+    if errors / total > 0.5:
+        logging.error('too many parsing errors. Aborting')
+        return None
+
+    return total_metrics
+
+
 def median(lst):
     sorted_lst = sorted(lst)
     lst_len = len(lst)
@@ -145,43 +174,34 @@ def median(lst):
         return (sorted_lst[index] + sorted_lst[index + 1]) / 2.
 
 
-class Statistics:
-    def __init__(self):
-        self.requests = {}
+def create_report(total_metrics, report_size, sort_by='time_sum'):
+    if sort_by not in ['url', 'count', 'count_perc', 'time_sum', 'time_perc', 'time_avg', 'time_max', 'time_med']:
+        logging.error('wrong sorting parameter')
+        return None
 
-    def update(self, metrics):
-        time_list = self.requests.setdefault(metrics.url, [metrics.time])
-        if time_list != [metrics.time]:
-            time_list.append(metrics.time)
+    logging.info('calculating statistics')
 
-    def get_report(self, report_size, sort_by='time_sum'):
-        if sort_by not in ['url', 'count', 'count_perc', 'time_sum', 'time_perc', 'time_avg', 'time_max', 'time_med']:
-            logging.error('wrong sorting parameter')
-            return None
+    full_report = []
 
-        logging.info('calculating statistics')
+    total_count = sum([len(lst) for lst in total_metrics.values()])
+    total_requests_time = sum([sum(lst) for lst in total_metrics.values()])
 
-        full_report = []
+    for url in total_metrics.keys():
+        count = len(total_metrics[url])
+        time_sum = sum(total_metrics[url])
+        full_report.append({
+            'url': url,
+            'count': count,
+            'count_perc': (count * 100) / total_count,
+            'time_sum': time_sum,
+            'time_perc': (time_sum * 100) / total_requests_time,
+            'time_avg': time_sum / count,
+            'time_max': max(total_metrics[url]),
+            'time_med': median(total_metrics[url])
+        })
 
-        total_count = sum([len(lst) for lst in self.requests.values()])
-        total_requests_time = sum([sum(lst) for lst in self.requests.values()])
-
-        for url in self.requests.keys():
-            count = len(self.requests[url])
-            time_sum = sum(self.requests[url])
-            full_report.append({
-                'url': url,
-                'count': count,
-                'count_perc': (count * 100) / total_count,
-                'time_sum': time_sum,
-                'time_perc': (time_sum * 100) / total_requests_time,
-                'time_avg': time_sum / count,
-                'time_max': max(self.requests[url]),
-                'time_med': median(self.requests[url])
-            })
-
-        full_report.sort(key=lambda d: d[sort_by], reverse=True)
-        return full_report[: report_size]
+    full_report.sort(key=lambda d: d[sort_by], reverse=True)
+    return full_report[: report_size]
 
 
 def write_report(report, report_file, report_template='report.html'):
@@ -201,41 +221,32 @@ def write_report(report, report_file, report_template='report.html'):
         logging.exception('error reading template file')
 
 
-def main():
-    if not read_argv(config):
+def main(local_config):
+    if not read_argv(local_config):
         return
 
-    configurate_logger(config.get('LOG_FILE'))
+    configurate_logger(local_config.get('LOG_FILE'))
 
     try:
-        log_info = read_paths(config["LOG_DIR"])
+        log_info = read_paths(local_config["LOG_DIR"])
 
-        report_file = check_report(config["REPORT_DIR"], log_info.date)
+        report_file = check_report(local_config["REPORT_DIR"], log_info.date)
 
         if not report_file:
             return
 
-        statistics = Statistics()
-        total, errors = 0, 0
-        for metrics in analyze_log_file(log_info.logfile):
-            total += 1
-            if metrics:
-                statistics.update(metrics)
-            else:
-                errors += 1
-
-        if errors / total > 0.5:
-            logging.error('too many parsing errors. Aborting')
-            return
-
-        report = statistics.get_report(config["REPORT_SIZE"], config["REPORT_SORT"])
+        report = create_report(
+            collect_metrics(log_info.logfile),
+            local_config["REPORT_SIZE"],
+            local_config["REPORT_SORT"]
+        )
 
         if report:
-            write_report(report, report_file, config['REPORT_TEMPLATE'])
+            write_report(report, report_file, local_config['REPORT_TEMPLATE'])
 
     except BaseException:
         logging.exception("Unexpected exception occured with traceback:")
 
 
 if __name__ == "__main__":
-    main()
+    main(config)
